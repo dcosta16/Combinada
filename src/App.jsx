@@ -1810,90 +1810,59 @@ function App() {
     setMessage("");
     setErrorMessage("");
 
-    const {
-      data: premios,
-      error,
-    } = await supabase
+    const { data: premios, error } = await supabase
       .from("premios")
-      .select(
-        "*, jornadas(nombre)"
-      )
+      .select(`
+        *,
+        jornadas (
+          nombre,
+          responsable_id
+        )
+      `)
       .gt("premio", 0)
-      .order("jornada_id", {
-        ascending: true,
-      });
+      .order("jornada_id", { ascending: true });
 
     if (error) {
-      console.error(
-        "Error cargando premios:",
-        error
-      );
-
-      setErrorMessage(
-        "No se pudieron cargar los premios."
-      );
-
+      console.error(error);
+      setErrorMessage("No se pudieron cargar los premios.");
       setLoading(false);
       return;
     }
 
+    // IDs de jugadores premiados
     const usuarioIds = [
+      ...new Set(premios.map((p) => p.usuario_id)),
+    ];
+
+    // IDs de responsables
+    const responsableIds = [
       ...new Set(
-        (premios || []).map(
-          (premio) =>
-            premio.usuario_id
-        )
+        premios
+          .map((p) => p.jornadas?.responsable_id)
+          .filter(Boolean)
       ),
     ];
 
-    let perfiles = [];
+    const todosIds = [...new Set([...usuarioIds, ...responsableIds])];
 
-    if (
-      usuarioIds.length > 0
-    ) {
-      const {
-        data: perfilesData,
-      } = await supabase
-        .from("perfiles")
-        .select(
-          "id, nombre"
-        )
-        .in(
-          "id",
-          usuarioIds
-        );
+    const { data: perfiles } = await supabase
+      .from("perfiles")
+      .select("id, nombre")
+      .in("id", todosIds);
 
-      perfiles =
-        perfilesData || [];
-    }
+    const perfilesPorId = {};
+    (perfiles || []).forEach((perfil) => {
+      perfilesPorId[perfil.id] = perfil.nombre;
+    });
 
-    const perfilesPorId =
-      new Map(
-        perfiles.map(
-          (jugador) => [
-            jugador.id,
-            jugador,
-          ]
-        )
-      );
+    const historial = premios.map((premio) => ({
+      ...premio,
+      jugador: perfilesPorId[premio.usuario_id] || "Jugador",
+      responsable:
+        perfilesPorId[premio.jornadas?.responsable_id] || "-",
+    }));
 
-    const premiosConNombre =
-      (
-        premios || []
-      ).map(
-        (premio) => ({
-          ...premio,
-          perfil:
-            perfilesPorId.get(
-              premio.usuario_id
-            ),
-        })
-      );
-
-    setPremiosHistorial(
-      premiosConNombre
-    );
-
+    setPremiosHistorial(historial);
     setLoading(false);
   }
 
@@ -3672,7 +3641,11 @@ function App() {
                       </th>
 
                       <th>
-                        Jugador
+                        Ganador
+                      </th>
+
+                      <th>
+                        Responsable
                       </th>
 
                       <th>
@@ -3690,60 +3663,32 @@ function App() {
                   </thead>
 
                   <tbody>
-                    {premiosHistorial.map(
-                      (
-                        premio
-                      ) => (
-                        <tr
-                          key={
-                            premio.id
-                          }
-                        >
-                          <td>
-                            {premio
-                              .jornadas
-                              ?.nombre ||
-                              `Jornada ${premio.jornada_id}`}
-                          </td>
+                    {premiosHistorial.map((premio) => (
+                      <tr key={premio.id}>
+                        <td>
+                          {premio.jornadas?.nombre ||
+                            `Jornada ${premio.jornada_id}`}
+                        </td>
 
-                          <td className="nombre">
-                            {premio
-                              .perfil
-                              ?.nombre ||
-                              "Jugador"}
-                          </td>
+                        <td className="nombre">
+                          🏆 {premio.jugador}
+                        </td>
 
-                          <td>
-                            {premio.aciertos ||
-                              0}
-                          </td>
+                        <td>
+                          👤 {premio.responsable}
+                        </td>
 
-                          <td>
-                            {premio.cuota !==
-                              null &&
-                            premio.cuota !==
-                              undefined
-                              ? Number(
-                                  premio.cuota
-                                ).toFixed(
-                                  2
-                                )
-                              : "-"}
-                          </td>
+                        <td>{premio.aciertos}</td>
 
-                          <td>
-                            <strong>
-                              {Number(
-                                premio.premio
-                              ).toFixed(
-                                2
-                              )}{" "}
-                              €
-                            </strong>
-                          </td>
-                        </tr>
-                      )
-                    )}
+                        <td>{Number(premio.cuota).toFixed(2)}</td>
+
+                        <td>
+                          <strong className="premio-verde">
+                            {Number(premio.premio).toFixed(2)} €
+                          </strong>
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
 
