@@ -12,6 +12,7 @@ function App() {
   const [jornadas, setJornadas] = useState([]);
   const [partidos, setPartidos] = useState([]);
   const [pronosticos, setPronosticos] = useState({});
+  const [pronosticosEnviados, setPronosticosEnviados] = useState(false);
 
   const [clasificacion, setClasificacion] = useState([]);
   const [premiosHistorial, setPremiosHistorial] =
@@ -403,9 +404,16 @@ function App() {
           setPronosticos(
             nuevosPronosticos
           );
+
+          const claveEnvio = `pronosticos_enviados_${session.user.id}_${jornadaActual.id}`;
+          const enviadosGuardados =
+            window.localStorage.getItem(claveEnvio) === "true";
+
+          setPronosticosEnviados(enviadosGuardados);
         }
       } else {
         setPronosticos({});
+        setPronosticosEnviados(false);
       }
 
       setPronosticosTodos([]);
@@ -752,27 +760,21 @@ function App() {
     setLoading(false);
   }
 
-  function seleccionarPronostico(
-    partidoId,
-    valor
-  ) {
-    if (!jornadaSeleccionada) {
+  function seleccionarPronostico(partidoId, opcion) {
+    // Una vez enviados, los pronósticos quedan bloqueados.
+    if (pronosticosEnviados) {
       return;
     }
 
-    if (
-      jornadaSeleccionada.estado !==
-      "abierta"
-    ) {
+    // Solo se pueden seleccionar pronósticos mientras la jornada está abierta.
+    if (!jornadaSeleccionada || jornadaSeleccionada.estado !== "abierta") {
       return;
     }
 
-    setPronosticos(
-      (actuales) => ({
-        ...actuales,
-        [partidoId]: valor,
-      })
-    );
+    setPronosticos((actuales) => ({
+      ...actuales,
+      [partidoId]: opcion,
+    }));
   }
 
   async function guardarPronosticos() {
@@ -786,6 +788,13 @@ function App() {
     ) {
       setErrorMessage(
         "Esta jornada ya está cerrada."
+      );
+      return;
+    }
+
+    if (pronosticosEnviados) {
+      setErrorMessage(
+        "Ya has enviado tus pronósticos. No se pueden modificar."
       );
       return;
     }
@@ -856,8 +865,16 @@ function App() {
       return;
     }
 
+    const claveEnvio = `pronosticos_enviados_${session.user.id}_${jornadaSeleccionada.id}`;
+    window.localStorage.setItem(
+      claveEnvio,
+      "true"
+    );
+
+    setPronosticosEnviados(true);
+
     setMessage(
-      "Pronósticos guardados correctamente."
+      "Pronósticos enviados correctamente. Ya no se pueden modificar."
     );
 
     setGuardando(false);
@@ -1210,659 +1227,530 @@ function App() {
   async function cargarClasificacion() {
     setLoading(true);
     setMessage("");
+    setErrorMessage("");
 
-    try {
-      /*
-      * ============================================================
-      * CARGAR DATOS NECESARIOS
-      * ============================================================
-      */
+    /*
+     * Cargamos jugadores.
+     */
+    const {
+      data: perfiles,
+      error: perfilesError,
+    } = await supabase
+      .from("perfiles")
+      .select(
+        "id, nombre, rol"
+      )
+      .order("nombre", {
+        ascending: true,
+      });
 
-      const { data: perfiles, error: perfilesError } =
-        await supabase
-          .from("perfiles")
-          .select("id, nombre, rol");
+    if (perfilesError) {
+      console.error(
+        "Error cargando perfiles:",
+        perfilesError
+      );
 
-      if (perfilesError) {
-        console.error(
-          "Error cargando perfiles:",
-          perfilesError
-        );
+      setErrorMessage(
+        "No se pudieron cargar los jugadores."
+      );
 
-        setMessage(
-          "No se pudieron cargar los perfiles."
-        );
+      setLoading(false);
+      return;
+    }
 
-        setLoading(false);
-        return;
-      }
+    /*
+     * Cargamos jornadas.
+     */
+    const {
+      data: jornadasData,
+      error: jornadasError,
+    } = await supabase
+      .from("jornadas")
+      .select("*")
+      .order("id", {
+        ascending: true,
+      });
 
-      const { data: jornadas, error: jornadasError } =
-        await supabase
-          .from("jornadas")
-          .select("id, nombre, estado");
+    if (jornadasError) {
+      console.error(
+        "Error cargando jornadas para la clasificación:",
+        jornadasError
+      );
 
-      if (jornadasError) {
-        console.error(
-          "Error cargando jornadas:",
-          jornadasError
-        );
+      setErrorMessage(
+        "No se pudieron cargar las jornadas."
+      );
 
-        setMessage(
-          "No se pudieron cargar las jornadas."
-        );
+      setLoading(false);
+      return;
+    }
 
-        setLoading(false);
-        return;
-      }
+    /*
+     * Actualizamos automáticamente jornadas
+     * que ya deberían estar cerradas.
+     */
+    const jornadasActualizadas =
+      await actualizarEstadosAutomaticamente(
+        jornadasData || []
+      );
 
-      const { data: premios, error: premiosError } =
-        await supabase
-          .from("premios")
-          .select("*");
-
-      if (premiosError) {
-        console.error(
-          "Error cargando premios:",
-          premiosError
-        );
-
-        setMessage(
-          "No se pudieron cargar los premios."
-        );
-
-        setLoading(false);
-        return;
-      }
-
-      /*
-      * ============================================================
-      * SOLO JORNADAS CERRADAS
-      * ============================================================
-      */
-
-      const jornadasCerradas = (jornadas || []).filter(
+    /*
+     * Solo las jornadas cerradas participan
+     * en la clasificación.
+     */
+    const jornadasCerradas =
+      jornadasActualizadas.filter(
         (jornada) =>
-          String(jornada.estado).toLowerCase() ===
+          jornada.estado ===
           "cerrada"
       );
 
+    /*
+     * Cargamos todos los premios.
+     *
+     * Los premios siguen utilizándose para
+     * calcular el dinero acumulado y las
+     * cuotas de desempate.
+     */
+    const {
+      data: premios,
+      error: premiosError,
+    } = await supabase
+      .from("premios")
+      .select("*");
+
+    if (premiosError) {
+      console.error(
+        "Error cargando premios:",
+        premiosError
+      );
+
+      setErrorMessage(
+        "No se pudo cargar la clasificación."
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    /*
+     * Estadísticas iniciales.
+     *
+     * Excluimos administradores de la
+     * clasificación.
+     */
+    const estadisticasPorUsuario =
+      new Map();
+
+    (
+      perfiles || []
+    ).forEach((jugador) => {
+      const rol =
+        jugador.rol?.toLowerCase();
+
+      if (
+        rol === "admin" ||
+        rol ===
+          "administrador"
+      ) {
+        return;
+      }
+
+      estadisticasPorUsuario.set(
+        jugador.id,
+        {
+          nombre:
+            jugador.nombre?.trim() ||
+            "Nombre no disponible",
+          usuarioId:
+            jugador.id,
+          totalAciertos: 0,
+          jornadasGanadas: 0,
+          totalPremios: 0,
+        }
+      );
+    });
+
+    /*
+     * Los premios monetarios se acumulan
+     * independientemente de que el jugador
+     * haya ganado o no una jornada.
+     */
+    (
+      premios || []
+    ).forEach((premio) => {
+      const estadistica =
+        estadisticasPorUsuario.get(
+          premio.usuario_id
+        );
+
+      if (!estadistica) {
+        return;
+      }
+
+      estadistica.totalPremios +=
+        Number(
+          premio.premio
+        ) || 0;
+    });
+
+    /*
+     * Recorremos cada jornada cerrada.
+     */
+    for (const jornada of jornadasCerradas) {
       /*
-      * ============================================================
-      * INICIALIZAR ESTADÍSTICAS
-      *
-      * Los administradores no participan.
-      * ============================================================
-      */
+       * Partidos de la jornada.
+       */
+      const {
+        data: partidosJornada,
+        error: partidosError,
+      } = await supabase
+        .from("partidos")
+        .select(
+          "id, resultado"
+        )
+        .eq(
+          "jornada_id",
+          jornada.id
+        )
+        .order("id", {
+          ascending: true,
+        });
 
-      const estadisticasPorUsuario = new Map();
-
-      (perfiles || []).forEach((jugador) => {
-        const rol = String(
-          jugador.rol || ""
-        ).toLowerCase();
-
-        if (
-          rol === "admin" ||
-          rol === "administrador"
-        ) {
-          return;
-        }
-
-        estadisticasPorUsuario.set(
-          jugador.id,
-          {
-            nombre:
-              jugador.nombre?.trim() ||
-              "Nombre no disponible",
-
-            usuarioId: jugador.id,
-
-            totalAciertos: 0,
-
-            jornadasGanadas: 0,
-
-            jornadasPerdidas: 0,
-
-            totalPremios: 0,
-          }
-        );
-      });
-
-      /*
-      * ============================================================
-      * PREMIOS ACUMULADOS
-      * ============================================================
-      */
-
-      (premios || []).forEach((premio) => {
-        const estadistica =
-          estadisticasPorUsuario.get(
-            premio.usuario_id
-          );
-
-        if (!estadistica) {
-          return;
-        }
-
-        estadistica.totalPremios +=
-          Number(premio.premio) || 0;
-      });
-
-      /*
-      * ============================================================
-      * PROCESAR CADA JORNADA CERRADA
-      * ============================================================
-      */
-
-      for (const jornada of jornadasCerradas) {
-        /*
-        * ----------------------------------------------------------
-        * PARTIDOS
-        * ----------------------------------------------------------
-        */
-
-        const {
-          data: partidosJornada,
-          error: partidosError,
-        } = await supabase
-          .from("partidos")
-          .select(
-            "id, resultado"
-          )
-          .eq(
-            "jornada_id",
-            jornada.id
-          )
-          .order("id", {
-            ascending: true,
-          });
-
-        if (partidosError) {
-          console.error(
-            `Error cargando partidos de jornada ${jornada.id}:`,
-            partidosError
-          );
-
-          continue;
-        }
-
-        if (
-          !partidosJornada ||
-          partidosJornada.length === 0
-        ) {
-          continue;
-        }
-
-        /*
-        * ----------------------------------------------------------
-        * PRONÓSTICOS
-        * ----------------------------------------------------------
-        */
-
-        const partidoIds =
-          partidosJornada.map(
-            (partido) =>
-              partido.id
-          );
-
-        const {
-          data: pronosticosJornada,
-          error: pronosticosError,
-        } = await supabase
-          .from("pronosticos")
-          .select(
-            "usuario_id, partido_id, pronostico"
-          )
-          .in(
-            "partido_id",
-            partidoIds
-          );
-
-        if (pronosticosError) {
-          console.error(
-            `Error cargando pronósticos de jornada ${jornada.id}:`,
-            pronosticosError
-          );
-
-          continue;
-        }
-
-        /*
-        * ----------------------------------------------------------
-        * PREMIOS / CUOTAS DE LA JORNADA
-        * ----------------------------------------------------------
-        */
-
-        const premiosJornada =
-          (premios || []).filter(
-            (premio) =>
-              premio.jornada_id ===
-              jornada.id
-          );
-
-        /*
-        * ----------------------------------------------------------
-        * AGRUPAR PRONÓSTICOS POR JUGADOR
-        * ----------------------------------------------------------
-        */
-
-        const pronosticosPorUsuario =
-          new Map();
-
-        (pronosticosJornada || []).forEach(
-          (pronostico) => {
-            if (
-              !pronosticosPorUsuario.has(
-                pronostico.usuario_id
-              )
-            ) {
-              pronosticosPorUsuario.set(
-                pronostico.usuario_id,
-                []
-              );
-            }
-
-            pronosticosPorUsuario
-              .get(
-                pronostico.usuario_id
-              )
-              .push(pronostico);
-          }
+      if (partidosError) {
+        console.error(
+          `Error cargando partidos de la jornada ${jornada.id}:`,
+          partidosError
         );
 
-        /*
-        * ----------------------------------------------------------
-        * JUGADORES ELEGIBLES
-        *
-        * SOLO participa quien haya enviado TODOS los pronósticos.
-        * ----------------------------------------------------------
-        */
+        continue;
+      }
 
-        const jugadoresElegibles = [];
-
-        estadisticasPorUsuario.forEach(
-          (estadistica, usuarioId) => {
-            const pronosticosUsuario =
-              pronosticosPorUsuario.get(
-                usuarioId
-              ) || [];
-
-            /*
-            * Un jugador tiene que haber pronosticado
-            * TODOS los partidos.
-            */
-            if (
-              pronosticosUsuario.length !==
-              partidosJornada.length
-            ) {
-              return;
-            }
-
-            /*
-            * Evitar posibles duplicados.
-            */
-            const partidosPronosticados =
-              new Set(
-                pronosticosUsuario.map(
-                  (p) =>
-                    p.partido_id
-                )
-              );
-
-            if (
-              partidosPronosticados.size !==
-              partidosJornada.length
-            ) {
-              return;
-            }
-
-            /*
-            * Calcular aciertos.
-            */
-            let aciertos = 0;
-
-            partidosJornada.forEach(
-              (partido) => {
-                const pronostico =
-                  pronosticosUsuario.find(
-                    (p) =>
-                      p.partido_id ===
-                      partido.id
-                  );
-
-                if (
-                  pronostico &&
-                  partido.resultado &&
-                  pronostico.pronostico ===
-                    partido.resultado
-                ) {
-                  aciertos += 1;
-                }
-              }
-            );
-
-            /*
-            * Buscar cuota del jugador.
-            */
-            const premioJugador =
-              premiosJornada.find(
-                (premio) =>
-                  premio.usuario_id ===
-                  usuarioId
-              );
-
-            const cuota =
-              Number(
-                premioJugador?.cuota
-              ) || 0;
-
-            jugadoresElegibles.push({
-              usuarioId,
-              aciertos,
-              cuota,
-            });
-
-            /*
-            * Acumulamos los aciertos totales.
-            */
-            estadistica.totalAciertos +=
-              aciertos;
-          }
-        );
-
-        /*
-        * Si nadie completó la jornada,
-        * no hay ganador ni perdedor.
-        */
-        if (
-          jugadoresElegibles.length === 0
-        ) {
-          continue;
-        }
-
-        /*
-        * ==========================================================
-        * GANADORES
-        * ==========================================================
-        *
-        * 1. Más aciertos.
-        * 2. Si empatan -> cuota más alta.
-        * 3. Si siguen empatados -> se reparte.
-        *
-        * Si todos tienen 0 aciertos,
-        * TODOS los elegibles son ganadores.
-        * ==========================================================
-        */
-
-        const maxAciertos =
-          Math.max(
-            ...jugadoresElegibles.map(
-              (jugador) =>
-                jugador.aciertos
-            )
-          );
-
-        let candidatosGanadores;
-
-        if (
-          maxAciertos === 0
-        ) {
-          /*
-          * Si todos tienen 0,
-          * todos ganan.
-          */
-          candidatosGanadores =
-            jugadoresElegibles;
-        } else {
-          const mejoresAciertos =
-            jugadoresElegibles.filter(
-              (jugador) =>
-                jugador.aciertos ===
-                maxAciertos
-            );
-
-          const maxCuota =
-            Math.max(
-              ...mejoresAciertos.map(
-                (jugador) =>
-                  jugador.cuota
-              )
-            );
-
-          candidatosGanadores =
-            mejoresAciertos.filter(
-              (jugador) =>
-                jugador.cuota ===
-                maxCuota
-            );
-        }
-
-        /*
-        * Reparto de la victoria.
-        *
-        * 1 jugador = 1
-        * 2 jugadores = 0.5
-        * 3 jugadores = 0.33
-        * 4 jugadores = 0.25
-        */
-        const parteVictoria =
-          1 /
-          candidatosGanadores.length;
-
-        candidatosGanadores.forEach(
-          (jugador) => {
-            const estadistica =
-              estadisticasPorUsuario.get(
-                jugador.usuarioId
-              );
-
-            if (!estadistica) {
-              return;
-            }
-
-            estadistica.jornadasGanadas +=
-              parteVictoria;
-          }
-        );
-
-        /*
-        * ==========================================================
-        * PERDEDORES
-        * ==========================================================
-        *
-        * 1. Menos aciertos.
-        * 2. Si empatan -> cuota más baja.
-        * 3. Si siguen empatados -> se reparte.
-        * ==========================================================
-        */
-
-        const minAciertos =
-          Math.min(
-            ...jugadoresElegibles.map(
-              (jugador) =>
-                jugador.aciertos
-            )
-          );
-
-        const peoresAciertos =
-          jugadoresElegibles.filter(
-            (jugador) =>
-              jugador.aciertos ===
-              minAciertos
-          );
-
-        const minCuota =
-          Math.min(
-            ...peoresAciertos.map(
-              (jugador) =>
-                jugador.cuota
-            )
-          );
-
-        const candidatosPerdedores =
-          peoresAciertos.filter(
-            (jugador) =>
-              jugador.cuota ===
-              minCuota
-          );
-
-        /*
-        * Reparto de la derrota.
-        */
-        const parteDerrota =
-          1 /
-          candidatosPerdedores.length;
-
-        candidatosPerdedores.forEach(
-          (jugador) => {
-            const estadistica =
-              estadisticasPorUsuario.get(
-                jugador.usuarioId
-              );
-
-            if (!estadistica) {
-              return;
-            }
-
-            estadistica.jornadasPerdidas +=
-              parteDerrota;
-          }
-        );
+      if (
+        !partidosJornada ||
+        partidosJornada.length ===
+          0
+      ) {
+        continue;
       }
 
       /*
-      * ============================================================
-      * ORDEN DE CLASIFICACIÓN
-      * ============================================================
-      *
-      * 1. Más victorias
-      * 2. Menos derrotas
-      * 3. Más aciertos
-      * 4. Más premios
-      * ============================================================
-      */
+       * Pronósticos de la jornada.
+       */
+      const partidoIds =
+        partidosJornada.map(
+          (partido) =>
+            partido.id
+        );
 
-      const estadisticas = Array.from(
-        estadisticasPorUsuario.values()
-      );
+      const {
+        data: pronosticosJornada,
+        error: pronosticosError,
+      } = await supabase
+        .from("pronosticos")
+        .select(
+          "usuario_id, partido_id, pronostico"
+        )
+        .in(
+          "partido_id",
+          partidoIds
+        );
 
-      estadisticas.sort(
-        (a, b) => {
-          if (
-            b.jornadasGanadas !==
-            a.jornadasGanadas
-          ) {
-            return (
-              b.jornadasGanadas -
-              a.jornadasGanadas
+      if (pronosticosError) {
+        console.error(
+          `Error cargando pronósticos de la jornada ${jornada.id}:`,
+          pronosticosError
+        );
+
+        continue;
+      }
+
+      /*
+       * Premios/cuotas de esta jornada.
+       */
+      const premiosJornadaData =
+        (
+          premios || []
+        ).filter(
+          (premio) =>
+            premio.jornada_id ===
+            jornada.id
+        );
+
+      /*
+       * Calculamos los ganadores.
+       */
+      const ganadores =
+        calcularGanadoresJornada({
+          partidosJornada,
+          pronosticosJornada:
+            pronosticosJornada ||
+            [],
+          premiosJornadaData,
+        });
+
+      /*
+       * Calculamos los aciertos de TODOS
+       * los jugadores que hayan completado
+       * la jornada.
+       *
+       * Esto permite que los aciertos
+       * aparezcan aunque no hayan ganado
+       * ni tengan premio monetario.
+       */
+      const usuariosJornada = [
+        ...new Set(
+          (
+            pronosticosJornada ||
+            []
+          ).map(
+            (pronostico) =>
+              pronostico.usuario_id
+          )
+        ),
+      ];
+
+      usuariosJornada.forEach(
+        (usuarioId) => {
+          const estadistica =
+            estadisticasPorUsuario.get(
+              usuarioId
             );
+
+          if (!estadistica) {
+            return;
           }
 
-          if (
-            a.jornadasPerdidas !==
-            b.jornadasPerdidas
-          ) {
-            return (
-              a.jornadasPerdidas -
-              b.jornadasPerdidas
+          const apuestasUsuario =
+            (
+              pronosticosJornada ||
+              []
+            ).filter(
+              (pronostico) =>
+                pronostico.usuario_id ===
+                usuarioId
             );
+
+          /*
+           * Solo contamos la jornada para
+           * los aciertos si la combinada
+           * está completa.
+           *
+           * De esta forma un jugador que
+           * entrega solo 8 de 10 no puede
+           * acumular artificialmente los
+           * aciertos de esa jornada.
+           */
+          const haCompletado =
+            apuestasUsuario.length ===
+              partidosJornada.length &&
+            partidosJornada.every(
+              (partido) =>
+                apuestasUsuario.some(
+                  (apuesta) =>
+                    apuesta.partido_id ===
+                      partido.id &&
+                    ["1", "X", "2"].includes(
+                      apuesta.pronostico
+                    )
+                )
+            );
+
+          if (!haCompletado) {
+            return;
           }
 
-          if (
-            b.totalAciertos !==
-            a.totalAciertos
-          ) {
-            return (
-              b.totalAciertos -
-              a.totalAciertos
-            );
-          }
+          const aciertos =
+            partidosJornada.reduce(
+              (
+                total,
+                partido
+              ) => {
+                const apuesta =
+                  apuestasUsuario.find(
+                    (pronostico) =>
+                      pronostico.partido_id ===
+                      partido.id
+                  );
 
-          return (
-            b.totalPremios -
-            a.totalPremios
-          );
+                return (
+                  total +
+                  (apuesta?.pronostico ===
+                  partido.resultado
+                    ? 1
+                    : 0)
+                );
+              },
+              0
+            );
+
+          estadistica.totalAciertos +=
+            aciertos;
         }
       );
 
-      setClasificacion(
-        estadisticas
-      );
-    } catch (error) {
-      console.error(
-        "Error calculando clasificación:",
-        error
-      );
+      /*
+       * Sumamos la fracción de victoria.
+       *
+       * Ejemplos:
+       * 1 ganador -> +1
+       * 2 empatados -> +0.5
+       * 3 empatados -> +0.333...
+       */
+      ganadores.forEach(
+        (ganador) => {
+          const estadistica =
+            estadisticasPorUsuario.get(
+              ganador.usuarioId
+            );
 
-      setMessage(
-        "No se pudo calcular la clasificación."
+          if (!estadistica) {
+            return;
+          }
+
+          estadistica.jornadasGanadas +=
+            ganador.victoria;
+        }
       );
-    } finally {
-      setLoading(false);
     }
+
+    /*
+     * Convertimos a array.
+     */
+    const estadisticas = Array.from(
+      estadisticasPorUsuario.values()
+    );
+
+    /*
+     * Orden:
+     *
+     * 1. Jornadas ganadas
+     * 2. Aciertos
+     * 3. Premios
+     */
+    estadisticas.sort((a, b) => {
+      if (
+        b.jornadasGanadas !==
+        a.jornadasGanadas
+      ) {
+        return (
+          b.jornadasGanadas -
+          a.jornadasGanadas
+        );
+      }
+
+      if (
+        b.totalAciertos !==
+        a.totalAciertos
+      ) {
+        return (
+          b.totalAciertos -
+          a.totalAciertos
+        );
+      }
+
+      return (
+        b.totalPremios -
+        a.totalPremios
+      );
+    });
+
+    setClasificacion(
+      estadisticas
+    );
+
+    setLoading(false);
   }
-
-
 
   async function cargarPremiosHistorial() {
     setLoading(true);
     setMessage("");
     setErrorMessage("");
 
-    const { data: premios, error } = await supabase
+    const {
+      data: premios,
+      error,
+    } = await supabase
       .from("premios")
-      .select(`
-        *,
-        jornadas (
-          nombre,
-          responsable_id
-        )
-      `)
+      .select(
+        "*, jornadas(nombre)"
+      )
       .gt("premio", 0)
-      .order("jornada_id", { ascending: true });
+      .order("jornada_id", {
+        ascending: true,
+      });
 
     if (error) {
-      console.error(error);
-      setErrorMessage("No se pudieron cargar los premios.");
+      console.error(
+        "Error cargando premios:",
+        error
+      );
+
+      setErrorMessage(
+        "No se pudieron cargar los premios."
+      );
+
       setLoading(false);
       return;
     }
 
-    // IDs de jugadores premiados
     const usuarioIds = [
-      ...new Set(premios.map((p) => p.usuario_id)),
-    ];
-
-    // IDs de responsables
-    const responsableIds = [
       ...new Set(
-        premios
-          .map((p) => p.jornadas?.responsable_id)
-          .filter(Boolean)
+        (premios || []).map(
+          (premio) =>
+            premio.usuario_id
+        )
       ),
     ];
 
-    const todosIds = [...new Set([...usuarioIds, ...responsableIds])];
+    let perfiles = [];
 
-    const { data: perfiles } = await supabase
-      .from("perfiles")
-      .select("id, nombre")
-      .in("id", todosIds);
+    if (
+      usuarioIds.length > 0
+    ) {
+      const {
+        data: perfilesData,
+      } = await supabase
+        .from("perfiles")
+        .select(
+          "id, nombre"
+        )
+        .in(
+          "id",
+          usuarioIds
+        );
 
-    const perfilesPorId = {};
-    (perfiles || []).forEach((perfil) => {
-      perfilesPorId[perfil.id] = perfil.nombre;
-    });
+      perfiles =
+        perfilesData || [];
+    }
 
-    const historial = premios.map((premio) => ({
-      ...premio,
-      jugador: perfilesPorId[premio.usuario_id] || "Jugador",
-      responsable:
-        perfilesPorId[premio.jornadas?.responsable_id] || "-",
-    }));
+    const perfilesPorId =
+      new Map(
+        perfiles.map(
+          (jugador) => [
+            jugador.id,
+            jugador,
+          ]
+        )
+      );
 
-    setPremiosHistorial(historial);
+    const premiosConNombre =
+      (
+        premios || []
+      ).map(
+        (premio) => ({
+          ...premio,
+          perfil:
+            perfilesPorId.get(
+              premio.usuario_id
+            ),
+        })
+      );
+
+    setPremiosHistorial(
+      premiosConNombre
+    );
+
     setLoading(false);
   }
 
@@ -3186,6 +3074,9 @@ function App() {
                                     key={
                                       opcion
                                     }
+                                    disabled={
+                                      pronosticosEnviados
+                                    }
                                     className={
                                       pronosticos[
                                         partido.id
@@ -3216,19 +3107,27 @@ function App() {
 
                   {jornadaSeleccionada.estado ===
                     "abierta" && (
-                    <button
-                      className="save-button"
-                      onClick={
-                        guardarPronosticos
-                      }
-                      disabled={
-                        guardando
-                      }
-                    >
-                      {guardando
-                        ? "Guardando..."
-                        : "Guardar pronósticos"}
-                    </button>
+                    <>
+                      {pronosticosEnviados ? (
+                        <div className="empty-card">
+                          ✓ Pronósticos enviados. Ya no se pueden modificar.
+                        </div>
+                      ) : (
+                        <button
+                          className="save-button"
+                          onClick={
+                            guardarPronosticos
+                          }
+                          disabled={
+                            guardando
+                          }
+                        >
+                          {guardando
+                            ? "Enviando..."
+                            : "Enviar pronósticos"}
+                        </button>
+                      )}
+                    </>
                   )}
                 </>
               )}
@@ -3502,11 +3401,6 @@ function App() {
                       </th>
 
                       <th>
-                        Jornadas
-                        perdidas
-                      </th>
-
-                      <th>
                         Premios
                       </th>
                     </tr>
@@ -3560,12 +3454,6 @@ function App() {
                           <td>
                             {formatearVictorias(
                               jugador.jornadasGanadas
-                            )}
-                          </td>
-
-                          <td>
-                            {formatearVictorias(
-                              jugador.jornadasPerdidas
                             )}
                           </td>
 
@@ -3641,11 +3529,7 @@ function App() {
                       </th>
 
                       <th>
-                        Ganador
-                      </th>
-
-                      <th>
-                        Responsable
+                        Jugador
                       </th>
 
                       <th>
@@ -3663,32 +3547,60 @@ function App() {
                   </thead>
 
                   <tbody>
-                    {premiosHistorial.map((premio) => (
-                      <tr key={premio.id}>
-                        <td>
-                          {premio.jornadas?.nombre ||
-                            `Jornada ${premio.jornada_id}`}
-                        </td>
+                    {premiosHistorial.map(
+                      (
+                        premio
+                      ) => (
+                        <tr
+                          key={
+                            premio.id
+                          }
+                        >
+                          <td>
+                            {premio
+                              .jornadas
+                              ?.nombre ||
+                              `Jornada ${premio.jornada_id}`}
+                          </td>
 
-                        <td className="nombre">
-                          🏆 {premio.jugador}
-                        </td>
+                          <td className="nombre">
+                            {premio
+                              .perfil
+                              ?.nombre ||
+                              "Jugador"}
+                          </td>
 
-                        <td>
-                          👤 {premio.responsable}
-                        </td>
+                          <td>
+                            {premio.aciertos ||
+                              0}
+                          </td>
 
-                        <td>{premio.aciertos}</td>
+                          <td>
+                            {premio.cuota !==
+                              null &&
+                            premio.cuota !==
+                              undefined
+                              ? Number(
+                                  premio.cuota
+                                ).toFixed(
+                                  2
+                                )
+                              : "-"}
+                          </td>
 
-                        <td>{Number(premio.cuota).toFixed(2)}</td>
-
-                        <td>
-                          <strong className="premio-verde">
-                            {Number(premio.premio).toFixed(2)} €
-                          </strong>
-                        </td>
-                      </tr>
-                    ))}
+                          <td>
+                            <strong>
+                              {Number(
+                                premio.premio
+                              ).toFixed(
+                                2
+                              )}{" "}
+                              €
+                            </strong>
+                          </td>
+                        </tr>
+                      )
+                    )}
                   </tbody>
                 </table>
 
