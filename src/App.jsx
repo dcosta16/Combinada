@@ -2394,7 +2394,7 @@ function App() {
           </div>
 
           <p className="eyebrow">
-            LA QUINIELA DE LOS AMIGOS
+            LA COMBINADA DE PIROLAS
           </p>
 
           <h1>
