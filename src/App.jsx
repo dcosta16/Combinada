@@ -151,6 +151,7 @@ function App() {
     setVista("jornadas");
     setJornadaSeleccionada(null);
     setPronosticos({});
+    setPronosticosEnviados(false);
     setPronosticosTodos([]);
     setCuotas({});
     setPremiosJornada({});
@@ -405,11 +406,34 @@ function App() {
             nuevosPronosticos
           );
 
-          const claveEnvio = `pronosticos_enviados_${session.user.id}_${jornadaActual.id}`;
-          const enviadosGuardados =
-            window.localStorage.getItem(claveEnvio) === "true";
+          /*
+           * Consideramos enviados los pronósticos cuando en Supabase
+           * existe un pronóstico válido para TODOS los partidos.
+           * Así el bloqueo funciona aunque el usuario cambie de
+           * navegador, dispositivo o recargue la página.
+           */
+          const pronosticosPorPartido =
+            new Map(
+              (pronosticosData || []).map(
+                (pronostico) => [
+                  pronostico.partido_id,
+                  pronostico.pronostico,
+                ]
+              )
+            );
 
-          setPronosticosEnviados(enviadosGuardados);
+          const enviadosGuardados =
+            (partidosData || []).length > 0 &&
+            (partidosData || []).every(
+              (partido) =>
+                ["1", "X", "2"].includes(
+                  pronosticosPorPartido.get(partido.id)
+                )
+            );
+
+          setPronosticosEnviados(
+            enviadosGuardados
+          );
         }
       } else {
         setPronosticos({});
@@ -577,6 +601,7 @@ function App() {
     );
 
     setPronosticos({});
+    setPronosticosEnviados(false);
     setJornadaSeleccionada(
       jornadaActual
     );
@@ -864,12 +889,6 @@ function App() {
       setGuardando(false);
       return;
     }
-
-    const claveEnvio = `pronosticos_enviados_${session.user.id}_${jornadaSeleccionada.id}`;
-    window.localStorage.setItem(
-      claveEnvio,
-      "true"
-    );
 
     setPronosticosEnviados(true);
 
@@ -1305,6 +1324,13 @@ function App() {
           "cerrada"
       );
 
+    const idsJornadasCerradas =
+      new Set(
+        jornadasCerradas.map(
+          (jornada) => jornada.id
+        )
+      );
+
     /*
      * Cargamos todos los premios.
      *
@@ -1366,6 +1392,7 @@ function App() {
             jugador.id,
           totalAciertos: 0,
           jornadasGanadas: 0,
+          jornadasPerdidas: 0,
           totalPremios: 0,
         }
       );
@@ -1392,6 +1419,22 @@ function App() {
         Number(
           premio.premio
         ) || 0;
+
+      /*
+       * La derrota se obtiene de la columna calculada
+       * automáticamente por Supabase y solo cuenta si la
+       * jornada está cerrada.
+       */
+      if (
+        idsJornadasCerradas.has(
+          premio.jornada_id
+        )
+      ) {
+        estadistica.jornadasPerdidas +=
+          Number(
+            premio.derrota
+          ) || 0;
+      }
     });
 
     /*
@@ -2394,7 +2437,7 @@ function App() {
           </div>
 
           <p className="eyebrow">
-            LA COMBINADA DE PIROLAS
+            LA QUINIELA DE LOS AMIGOS
           </p>
 
           <h1>
@@ -3401,6 +3444,11 @@ function App() {
                       </th>
 
                       <th>
+                        Jornadas
+                        perdidas
+                      </th>
+
+                      <th>
                         Premios
                       </th>
                     </tr>
@@ -3454,6 +3502,12 @@ function App() {
                           <td>
                             {formatearVictorias(
                               jugador.jornadasGanadas
+                            )}
+                          </td>
+
+                          <td>
+                            {formatearVictorias(
+                              jugador.jornadasPerdidas
                             )}
                           </td>
 
