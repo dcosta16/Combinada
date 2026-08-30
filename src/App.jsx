@@ -166,11 +166,19 @@ function App() {
    * Una jornada se considera cerrada cuando:
    * fecha_fin + 12:00 ya ha pasado.
    */
-  // Ya no se cierra ninguna jornada desde el cliente por fecha.
-  // El trigger de Supabase decide cuándo está completa.
+  /*
+   * Una jornada NO se cierra por fecha.
+   *
+   * El cierre real lo determina Supabase cuando todos los
+   * partidos tienen un resultado válido (1, X o 2).
+   *
+   * Esta función se conserva por compatibilidad con el resto
+   * de la app, pero ya no modifica la base de datos.
+   */
   async function actualizarEstadosAutomaticamente(jornadasData) {
     return jornadasData || [];
   }
+
 
   async function cargarJornadas() {
     setLoading(true);
@@ -196,10 +204,14 @@ function App() {
       return;
     }
 
-    // El estado de la jornada lo decide Supabase.
-    // La app nunca la cierra por fecha: solo se cierra
-    // automáticamente cuando están TODOS los resultados.
-    setJornadas(data || []);
+    const jornadasConEstadoActualizado =
+      await actualizarEstadosAutomaticamente(
+        data || []
+      );
+
+    setJornadas(
+      jornadasConEstadoActualizado
+    );
 
     setLoading(false);
   }
@@ -237,9 +249,9 @@ function App() {
     setMessage("");
     setErrorMessage("");
 
-    // No cerramos la jornada desde la app. Supabase la cerrará
-    // únicamente cuando el último resultado oficial esté guardado.
-    const jornadaActual = { ...jornada };
+    let jornadaActual = {
+      ...jornada,
+    };
 
     const {
       data: partidosData,
@@ -276,11 +288,18 @@ function App() {
     ).map((partido) => partido.id);
 
     /*
-     * JORNADA ABIERTA
+     * Una jornada solo se considera terminada para mostrar resultados
+     * cuando TODOS sus partidos tienen resultado válido.
+     *
+     * No usamos jornada.estado para esta decisión.
      */
-    if (
-      jornadaActual.estado === "abierta"
-    ) {
+    const jornadaCompleta =
+      jornadaTieneTodosLosResultados(partidosData || []);
+
+    /*
+     * JORNADA TODAVÍA NO COMPLETA
+     */
+    if (!jornadaActual || jornadaActual.estado !== "cerrada") {
       if (partidoIds.length > 0) {
         const {
           data: pronosticosData,
@@ -357,6 +376,11 @@ function App() {
       setPremiosJornada({});
       setResultados({});
 
+      jornadaActual = {
+        ...jornadaActual,
+        resultadosCompletos: false,
+      };
+
       setJornadaSeleccionada(
         jornadaActual
       );
@@ -370,7 +394,8 @@ function App() {
     /*
      * JORNADA CERRADA
      *
-     * Cargamos todos los pronósticos.
+     * Solo cuando estado === "cerrada" cargamos los pronósticos
+     * de todos los jugadores para mostrarlos.
      */
     if (partidoIds.length > 0) {
       const {
@@ -511,6 +536,15 @@ function App() {
     setResultados(
       resultadosIniciales
     );
+
+    /*
+     * Guardamos la condición real de finalización para que la interfaz
+     * no dependa de un estado antiguo de la fila jornadas.
+     */
+    jornadaActual = {
+      ...jornadaActual,
+      resultadosCompletos: jornadaCompleta,
+    };
 
     setPronosticos({});
     setPronosticosEnviados(false);
@@ -962,185 +996,130 @@ function App() {
    *    todos los jugadores completos son
    *    igualmente ganadores.
    */
+  /*
+   * COMPROBAR SI UNA JORNADA ESTÁ COMPLETA
+   *
+   * La condición definitiva es que TODOS los partidos tengan
+   * un resultado válido. No usamos jornada.estado para decidirlo.
+   */
+  function jornadaTieneTodosLosResultados(partidosJornada) {
+    if (!partidosJornada || partidosJornada.length === 0) {
+      return false;
+    }
+
+    return partidosJornada.every((partido) =>
+      ["1", "X", "2"].includes(partido.resultado)
+    );
+  }
+
+  /*
+   * CALCULAR GANADORES DE UNA JORNADA
+   *
+   * Esta función solo se usa para jornadas completas.
+   */
   function calcularGanadoresJornada({
     partidosJornada,
     pronosticosJornada,
     premiosJornadaData,
   }) {
-    if (
-      !partidosJornada ||
-      partidosJornada.length === 0
-    ) {
+    if (!jornadaTieneTodosLosResultados(partidosJornada)) {
       return [];
     }
 
     const usuarios = [
       ...new Set(
-        (
-          pronosticosJornada ||
-          []
-        ).map(
-          (pronostico) =>
-            pronostico.usuario_id
+        (pronosticosJornada || []).map(
+          (pronostico) => pronostico.usuario_id
         )
       ),
     ];
 
-    const jugadoresCompletos =
-      usuarios
-        .map((usuarioId) => {
-          const apuestasUsuario =
-            (
-              pronosticosJornada ||
-              []
-            ).filter(
+    const jugadoresCompletos = usuarios
+      .map((usuarioId) => {
+        const apuestasUsuario =
+          (pronosticosJornada || []).filter(
+            (pronostico) =>
+              pronostico.usuario_id === usuarioId
+          );
+
+        const haCompletado =
+          apuestasUsuario.length === partidosJornada.length &&
+          partidosJornada.every((partido) =>
+            apuestasUsuario.some(
+              (apuesta) =>
+                apuesta.partido_id === partido.id &&
+                ["1", "X", "2"].includes(apuesta.pronostico)
+            )
+          );
+
+        if (!haCompletado) {
+          return null;
+        }
+
+        const aciertos = partidosJornada.reduce(
+          (total, partido) => {
+            const apuesta = apuestasUsuario.find(
               (pronostico) =>
-                pronostico.usuario_id ===
-                usuarioId
+                pronostico.partido_id === partido.id
             );
 
-          /*
-           * Debe existir exactamente un
-           * pronóstico válido para cada partido.
-           */
-          const haCompletado =
-            apuestasUsuario.length ===
-              partidosJornada.length &&
-            partidosJornada.every(
-              (partido) =>
-                apuestasUsuario.some(
-                  (apuesta) =>
-                    apuesta.partido_id ===
-                      partido.id &&
-                    ["1", "X", "2"].includes(
-                      apuesta.pronostico
-                    )
-                )
+            return (
+              total +
+              (apuesta?.pronostico === partido.resultado ? 1 : 0)
             );
+          },
+          0
+        );
 
-          if (!haCompletado) {
-            return null;
-          }
+        const premioJugador =
+          (premiosJornadaData || []).find(
+            (premio) =>
+              premio.usuario_id === usuarioId
+          );
 
-          const aciertos =
-            partidosJornada.reduce(
-              (
-                total,
-                partido
-              ) => {
-                const apuesta =
-                  apuestasUsuario.find(
-                    (pronostico) =>
-                      pronostico.partido_id ===
-                      partido.id
-                  );
+        return {
+          usuarioId,
+          aciertos,
+          cuota: Number(premioJugador?.cuota) || 0,
+        };
+      })
+      .filter(Boolean);
 
-                if (
-                  apuesta?.pronostico &&
-                  partido.resultado &&
-                  apuesta.pronostico ===
-                    partido.resultado
-                ) {
-                  return (
-                    total + 1
-                  );
-                }
-
-                return total;
-              },
-              0
-            );
-
-          const premioJugador =
-            (
-              premiosJornadaData ||
-              []
-            ).find(
-              (premio) =>
-                premio.usuario_id ===
-                usuarioId
-            );
-
-          const cuota =
-            Number(
-              premioJugador?.cuota
-            ) || 0;
-
-          return {
-            usuarioId,
-            aciertos,
-            cuota,
-          };
-        })
-        .filter(Boolean);
-
-    /*
-     * Nadie ha presentado una jornada
-     * completa.
-     */
-    if (
-      jugadoresCompletos.length ===
-      0
-    ) {
+    if (jugadoresCompletos.length === 0) {
       return [];
     }
 
-    /*
-     * Primero buscamos el máximo de
-     * aciertos.
-     */
-    const maxAciertos =
-      Math.max(
-        ...jugadoresCompletos.map(
-          (jugador) =>
-            jugador.aciertos
+    const maxAciertos = Math.max(
+      ...jugadoresCompletos.map(
+        (jugador) => jugador.aciertos
+      )
+    );
+
+    let candidatos = jugadoresCompletos.filter(
+      (jugador) =>
+        jugador.aciertos === maxAciertos
+    );
+
+    if (candidatos.length > 1) {
+      const maxCuota = Math.max(
+        ...candidatos.map(
+          (jugador) => jugador.cuota
         )
       );
 
-    let candidatos =
-      jugadoresCompletos.filter(
+      candidatos = candidatos.filter(
         (jugador) =>
-          jugador.aciertos ===
-          maxAciertos
+          jugador.cuota === maxCuota
       );
-
-    /*
-     * Si hay empate en aciertos,
-     * utilizamos la cuota como segundo
-     * criterio.
-     */
-    if (candidatos.length > 1) {
-      const maxCuota =
-        Math.max(
-          ...candidatos.map(
-            (jugador) =>
-              jugador.cuota
-          )
-        );
-
-      candidatos =
-        candidatos.filter(
-          (jugador) =>
-            jugador.cuota ===
-            maxCuota
-        );
     }
 
-    /*
-     * Repartimos una victoria entre
-     * todos los candidatos.
-     */
-    const victoria =
-      1 / candidatos.length;
+    const victoria = 1 / candidatos.length;
 
-    return candidatos.map(
-      (jugador) => ({
-        ...jugador,
-        victoria,
-      })
-    );
+    return candidatos.map((jugador) => ({
+      ...jugador,
+      victoria,
+    }));
   }
-
   /*
    * CLASIFICACIÓN
    *
@@ -1160,72 +1139,422 @@ function App() {
     setMessage("");
     setErrorMessage("");
 
-    const [{ data: perfiles, error: perfilesError }, { data: jornadasData, error: jornadasError }, { data: premios, error: premiosError }] = await Promise.all([
-      supabase.from("perfiles").select("id, nombre, rol").order("nombre", { ascending: true }),
-      supabase.from("jornadas").select("id, estado"),
-      supabase.from("premios").select("jornada_id, usuario_id, aciertos, victoria, ganador, derrota, premio"),
-    ]);
+    const {
+      data: perfiles,
+      error: perfilesError,
+    } = await supabase
+      .from("perfiles")
+      .select("id, nombre, rol")
+      .order("nombre", {
+        ascending: true,
+      });
 
-    if (perfilesError || jornadasError || premiosError) {
-      console.error("Error cargando clasificación:", perfilesError || jornadasError || premiosError);
-      setErrorMessage("No se pudo cargar la clasificación.");
+    if (perfilesError) {
+      console.error(
+        "Error cargando perfiles:",
+        perfilesError
+      );
+
+      setErrorMessage(
+        "No se pudieron cargar los jugadores."
+      );
+
       setLoading(false);
       return;
     }
 
-    // Única regla de publicación: solo cuentan jornadas que Supabase
-    // ya ha marcado como cerradas. Nunca se calculan resultados parciales.
-    const idsCerradas = new Set((jornadasData || []).filter((j) => j.estado === "cerrada").map((j) => j.id));
-    const estadisticas = new Map();
+    const {
+      data: jornadasData,
+      error: jornadasError,
+    } = await supabase
+      .from("jornadas")
+      .select("*")
+      .order("id", {
+        ascending: true,
+      });
+
+    if (jornadasError) {
+      console.error(
+        "Error cargando jornadas para la clasificación:",
+        jornadasError
+      );
+
+      setErrorMessage(
+        "No se pudieron cargar las jornadas."
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    /*
+     * Cargamos todos los partidos de una vez.
+     * Una jornada cuenta SOLO si todos sus partidos tienen
+     * resultado válido.
+     */
+    const {
+      data: todosLosPartidos,
+      error: partidosError,
+    } = await supabase
+      .from("partidos")
+      .select("id, jornada_id, resultado")
+      .order("id", {
+        ascending: true,
+      });
+
+    if (partidosError) {
+      console.error(
+        "Error cargando partidos para la clasificación:",
+        partidosError
+      );
+
+      setErrorMessage(
+        "No se pudieron comprobar los resultados de las jornadas."
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    const partidosPorJornada = new Map();
+
+    (todosLosPartidos || []).forEach((partido) => {
+      if (!partidosPorJornada.has(partido.jornada_id)) {
+        partidosPorJornada.set(partido.jornada_id, []);
+      }
+
+      partidosPorJornada
+        .get(partido.jornada_id)
+        .push(partido);
+    });
+
+    const jornadasCompletas =
+      (jornadasData || []).filter((jornada) =>
+        jornadaTieneTodosLosResultados(
+          partidosPorJornada.get(jornada.id) || []
+        )
+      );
+
+    const idsJornadasCompletas = new Set(
+      jornadasCompletas.map(
+        (jornada) => jornada.id
+      )
+    );
+
+    const {
+      data: premios,
+      error: premiosError,
+    } = await supabase
+      .from("premios")
+      .select("*");
+
+    if (premiosError) {
+      console.error(
+        "Error cargando premios:",
+        premiosError
+      );
+
+      setErrorMessage(
+        "No se pudo cargar la clasificación."
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    const estadisticasPorUsuario = new Map();
 
     (perfiles || []).forEach((jugador) => {
       const rol = jugador.rol?.toLowerCase();
-      if (rol === "admin" || rol === "administrador") return;
-      estadisticas.set(jugador.id, {
-        nombre: jugador.nombre?.trim() || "Nombre no disponible",
-        usuarioId: jugador.id,
-        totalAciertos: 0,
-        jornadasGanadas: 0,
-        jornadasPerdidas: 0,
-        totalPremios: 0,
+
+      if (
+        rol === "admin" ||
+        rol === "administrador"
+      ) {
+        return;
+      }
+
+      estadisticasPorUsuario.set(
+        jugador.id,
+        {
+          nombre:
+            jugador.nombre?.trim() ||
+            "Nombre no disponible",
+          usuarioId: jugador.id,
+          totalAciertos: 0,
+          jornadasGanadas: 0,
+          jornadasPerdidas: 0,
+          totalPremios: 0,
+        }
+      );
+    });
+
+    /*
+     * El dinero acumulado también se limita a jornadas completas.
+     * Así una fila antigua de premios de una jornada incompleta
+     * no aparece como resultado definitivo.
+     */
+    (premios || []).forEach((premio) => {
+      const estadistica =
+        estadisticasPorUsuario.get(
+          premio.usuario_id
+        );
+
+      if (!estadistica) {
+        return;
+      }
+
+      if (
+        !idsJornadasCompletas.has(
+          premio.jornada_id
+        )
+      ) {
+        return;
+      }
+
+      estadistica.totalPremios +=
+        Number(premio.premio) || 0;
+
+      estadistica.jornadasPerdidas +=
+        Number(premio.derrota) || 0;
+
+      estadistica.jornadasGanadas +=
+        Number(premio.victoria) || 0;
+    });
+
+    /*
+     * Cargamos pronósticos solo de jornadas completas
+     * para calcular los aciertos definitivos de cada jugador.
+     */
+    for (const jornada of jornadasCompletas) {
+      const partidosJornada =
+        partidosPorJornada.get(
+          jornada.id
+        ) || [];
+
+      if (
+        !jornadaTieneTodosLosResultados(
+          partidosJornada
+        )
+      ) {
+        continue;
+      }
+
+      const partidoIds =
+        partidosJornada.map(
+          (partido) => partido.id
+        );
+
+      if (partidoIds.length === 0) {
+        continue;
+      }
+
+      const {
+        data: pronosticosJornada,
+        error: pronosticosError,
+      } = await supabase
+        .from("pronosticos")
+        .select(
+          "usuario_id, partido_id, pronostico"
+        )
+        .in(
+          "partido_id",
+          partidoIds
+        );
+
+      if (pronosticosError) {
+        console.error(
+          `Error cargando pronósticos de la jornada ${jornada.id}:`,
+          pronosticosError
+        );
+        continue;
+      }
+
+      const usuariosJornada = [
+        ...new Set(
+          (pronosticosJornada || []).map(
+            (pronostico) =>
+              pronostico.usuario_id
+          )
+        ),
+      ];
+
+      usuariosJornada.forEach((usuarioId) => {
+        const estadistica =
+          estadisticasPorUsuario.get(
+            usuarioId
+          );
+
+        if (!estadistica) {
+          return;
+        }
+
+        const apuestasUsuario =
+          (pronosticosJornada || []).filter(
+            (pronostico) =>
+              pronostico.usuario_id ===
+              usuarioId
+          );
+
+        const haCompletado =
+          apuestasUsuario.length ===
+            partidosJornada.length &&
+          partidosJornada.every((partido) =>
+            apuestasUsuario.some(
+              (apuesta) =>
+                apuesta.partido_id ===
+                  partido.id &&
+                ["1", "X", "2"].includes(
+                  apuesta.pronostico
+                )
+            )
+          );
+
+        if (!haCompletado) {
+          return;
+        }
+
+        const aciertos =
+          partidosJornada.reduce(
+            (total, partido) => {
+              const apuesta =
+                apuestasUsuario.find(
+                  (pronostico) =>
+                    pronostico.partido_id ===
+                    partido.id
+                );
+
+              return (
+                total +
+                (apuesta?.pronostico ===
+                partido.resultado
+                  ? 1
+                  : 0)
+              );
+            },
+            0
+          );
+
+        estadistica.totalAciertos +=
+          aciertos;
       });
-    });
+    }
 
-    (premios || []).forEach((p) => {
-      if (!idsCerradas.has(p.jornada_id)) return;
-      const e = estadisticas.get(p.usuario_id);
-      if (!e) return;
-      e.totalAciertos += Number(p.aciertos) || 0;
-      e.jornadasGanadas += Number(p.victoria ?? (p.ganador ? 1 : 0)) || 0;
-      e.jornadasPerdidas += Number(p.derrota) || 0;
-      e.totalPremios += Number(p.premio) || 0;
-    });
-
-    const nuevaClasificacion = Array.from(estadisticas.values()).sort((a, b) =>
-      b.totalAciertos - a.totalAciertos ||
-      b.jornadasGanadas - a.jornadasGanadas ||
-      a.jornadasPerdidas - b.jornadasPerdidas ||
-      b.totalPremios - a.totalPremios ||
-      a.nombre.localeCompare(b.nombre)
+    const estadisticas = Array.from(
+      estadisticasPorUsuario.values()
     );
 
-    setClasificacion(nuevaClasificacion);
+    estadisticas.sort((a, b) => {
+      if (
+        b.jornadasGanadas !==
+        a.jornadasGanadas
+      ) {
+        return (
+          b.jornadasGanadas -
+          a.jornadasGanadas
+        );
+      }
+
+      if (
+        b.totalAciertos !==
+        a.totalAciertos
+      ) {
+        return (
+          b.totalAciertos -
+          a.totalAciertos
+        );
+      }
+
+      return (
+        b.totalPremios -
+        a.totalPremios
+      );
+    });
+
+    setClasificacion(
+      estadisticas
+    );
+
     setLoading(false);
   }
-
   async function cargarPremiosHistorial() {
     setLoading(true);
     setMessage("");
     setErrorMessage("");
 
     const {
+      data: jornadasData,
+      error: jornadasError,
+    } = await supabase
+      .from("jornadas")
+      .select("id, nombre")
+      .order("id", {
+        ascending: true,
+      });
+
+    if (jornadasError) {
+      console.error(
+        "Error cargando jornadas:",
+        jornadasError
+      );
+
+      setErrorMessage(
+        "No se pudieron cargar las jornadas."
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    const {
+      data: partidosData,
+      error: partidosError,
+    } = await supabase
+      .from("partidos")
+      .select("id, jornada_id, resultado");
+
+    if (partidosError) {
+      console.error(
+        "Error cargando partidos:",
+        partidosError
+      );
+
+      setErrorMessage(
+        "No se pudieron comprobar los resultados."
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    const partidosPorJornada = new Map();
+
+    (partidosData || []).forEach((partido) => {
+      if (!partidosPorJornada.has(partido.jornada_id)) {
+        partidosPorJornada.set(partido.jornada_id, []);
+      }
+
+      partidosPorJornada
+        .get(partido.jornada_id)
+        .push(partido);
+    });
+
+    const jornadasCompletas = new Set(
+      (jornadasData || [])
+        .filter((jornada) =>
+          jornadaTieneTodosLosResultados(
+            partidosPorJornada.get(jornada.id) || []
+          )
+        )
+        .map((jornada) => jornada.id)
+    );
+
+    const {
       data: premios,
       error,
     } = await supabase
       .from("premios")
-      .select(
-        "*, jornadas(nombre)"
-      )
+      .select("*")
       .gt("premio", 0)
       .order("jornada_id", {
         ascending: true,
@@ -1245,9 +1574,20 @@ function App() {
       return;
     }
 
+    /*
+     * Una jornada incompleta nunca aparece en el historial,
+     * aunque existan filas antiguas en premios.
+     */
+    const premiosCompletos =
+      (premios || []).filter((premio) =>
+        jornadasCompletas.has(
+          premio.jornada_id
+        )
+      );
+
     const usuarioIds = [
       ...new Set(
-        (premios || []).map(
+        premiosCompletos.map(
           (premio) =>
             premio.usuario_id
         )
@@ -1256,16 +1596,12 @@ function App() {
 
     let perfiles = [];
 
-    if (
-      usuarioIds.length > 0
-    ) {
+    if (usuarioIds.length > 0) {
       const {
         data: perfilesData,
       } = await supabase
         .from("perfiles")
-        .select(
-          "id, nombre"
-        )
+        .select("id, nombre")
         .in(
           "id",
           usuarioIds
@@ -1285,12 +1621,24 @@ function App() {
         )
       );
 
+    const jornadasPorId =
+      new Map(
+        (jornadasData || []).map(
+          (jornada) => [
+            jornada.id,
+            jornada,
+          ]
+        )
+      );
+
     const premiosConNombre =
-      (
-        premios || []
-      ).map(
+      premiosCompletos.map(
         (premio) => ({
           ...premio,
+          jornadas:
+            jornadasPorId.get(
+              premio.jornada_id
+            ),
           perfil:
             perfilesPorId.get(
               premio.usuario_id
@@ -1304,7 +1652,6 @@ function App() {
 
     setLoading(false);
   }
-
   async function cambiarVista(
     nuevaVista
   ) {
@@ -1499,6 +1846,53 @@ function App() {
       return;
     }
 
+    /*
+     * El cierre manual queda bloqueado.
+     * Una jornada solo puede cerrarse cuando TODOS sus partidos
+     * tienen resultado. El trigger de Supabase se encarga de ello.
+     */
+    if (nuevoEstado === "cerrada") {
+      const {
+        data: partidosJornada,
+        error: partidosError,
+      } = await supabase
+        .from("partidos")
+        .select("id, resultado")
+        .eq(
+          "jornada_id",
+          jornadaId
+        );
+
+      if (partidosError) {
+        console.error(
+          "Error comprobando resultados:",
+          partidosError
+        );
+
+        setErrorMessage(
+          "No se pudo comprobar si todos los partidos tienen resultado."
+        );
+        return;
+      }
+
+      if (
+        !jornadaTieneTodosLosResultados(
+          partidosJornada || []
+        )
+      ) {
+        setErrorMessage(
+          "No puedes cerrar la jornada: todavía faltan resultados."
+        );
+        return;
+      }
+
+      setMessage(
+        "Todos los resultados están completos. Supabase cerrará la jornada automáticamente."
+      );
+      await cargarJornadas();
+      return;
+    }
+
     setGuardando(true);
     setMessage("");
     setErrorMessage("");
@@ -1537,7 +1931,6 @@ function App() {
 
     setGuardando(false);
   }
-
   async function cargarPartidosAdmin(
     jornada
   ) {
@@ -1727,23 +2120,46 @@ function App() {
       return;
     }
 
-    setMessage(
-      "Resultado guardado correctamente."
-    );
+    const nuevosPartidos =
+      partidos.map(
+        (partido) =>
+          partido.id === partidoId
+            ? {
+                ...partido,
+                resultado,
+              }
+            : partido
+      );
 
-    setPartidos(
-      (actuales) =>
-        actuales.map(
-          (partido) =>
-            partido.id ===
-            partidoId
-              ? {
-                  ...partido,
-                  resultado,
-                }
-              : partido
-        )
-    );
+    setPartidos(nuevosPartidos);
+
+    const completa =
+      jornadaTieneTodosLosResultados(
+        nuevosPartidos
+      );
+
+    if (completa) {
+      setMessage(
+        "Último resultado guardado. La jornada está completa; Supabase está calculando la clasificación y el responsable."
+      );
+
+      /*
+       * Refrescamos jornadas para recoger el estado/responsable
+       * que haya actualizado Supabase.
+       */
+      await cargarJornadas();
+
+      /*
+       * Recargamos la jornada para obtener los datos definitivos.
+       */
+      await cargarPanelResponsable(
+        jornadaSeleccionada
+      );
+    } else {
+      setMessage(
+        "Resultado guardado correctamente. La clasificación todavía no se actualiza porque faltan resultados."
+      );
+    }
 
     setGuardando(false);
   }
@@ -3563,11 +3979,25 @@ function App() {
                                   ⚽ Partidos
                                 </button>
 
-                                <span className="status-note">
-                                  {jornada.estado === "cerrada"
-                                    ? "🏁 Finalizada automáticamente"
-                                    : "⏳ Se cerrará al guardar todos los resultados"}
-                                </span>
+                                {jornada.estado ===
+                                "cerrada" ? (
+                                  <button
+                                    className="small-button secondary-small"
+                                    onClick={() =>
+                                      cambiarEstadoJornada(
+                                        jornada.id,
+                                        "abierta"
+                                      )
+                                    }
+                                  >
+                                    🔓
+                                    Abrir
+                                  </button>
+                                ) : (
+                                  <span className="form-help">
+                                    Se cerrará automáticamente al completar todos los resultados.
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </article>
@@ -3724,9 +4154,8 @@ function App() {
                     </h3>
 
                     <p>
-                      Introduce 1, X o 2
-                      cuando finalice
-                      cada partido.
+                      Introduce 1, X o 2 cuando finalice cada partido.
+                      La clasificación solo se actualizará cuando estén todos.
                     </p>
                   </div>
                 </div>
