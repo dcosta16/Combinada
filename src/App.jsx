@@ -2834,7 +2834,7 @@ function App() {
                                 </strong>
 
                                 <span>
-                                  vs
+                                  -
                                 </span>
 
                                 <strong>
@@ -3110,7 +3110,7 @@ function App() {
                               </strong>
 
                               <span>
-                                vs
+                                -
                               </span>
 
                               <strong>
@@ -4283,7 +4283,7 @@ function App() {
                             </strong>
 
                             <span>
-                              vs
+                              -
                             </span>
 
                             <strong>
