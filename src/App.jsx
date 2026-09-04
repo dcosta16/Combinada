@@ -244,6 +244,19 @@ function App() {
    * Jornada cerrada:
    *   Se cargan TODOS los pronósticos.
    */
+  /*
+   * CARGAR JORNADA
+   *
+   * Antes de fecha_fin + 12:00:
+   *   Solo se cargan los pronósticos del usuario actual.
+   *
+   * Desde fecha_fin + 12:00:
+   *   Se cargan TODOS los pronósticos para que queden publicados,
+   *   aunque la jornada todavía no esté cerrada.
+   *
+   * La clasificación/aciertos definitivos NO dependen de esta fecha.
+   * Solo se calculan cuando todos los partidos tienen resultado.
+   */
   async function cargarJornada(jornada) {
     setLoading(true);
     setMessage("");
@@ -287,121 +300,27 @@ function App() {
       partidosData || []
     ).map((partido) => partido.id);
 
-    /*
-     * Una jornada solo se considera terminada para mostrar resultados
-     * cuando TODOS sus partidos tienen resultado válido.
-     *
-     * No usamos jornada.estado para esta decisión.
-     */
     const jornadaCompleta =
-      jornadaTieneTodosLosResultados(partidosData || []);
-
-    /*
-     * JORNADA TODAVÍA NO COMPLETA
-     */
-    if (!jornadaActual || jornadaActual.estado !== "cerrada") {
-      if (partidoIds.length > 0) {
-        const {
-          data: pronosticosData,
-          error: pronosticosError,
-        } = await supabase
-          .from("pronosticos")
-          .select("*")
-          .eq(
-            "usuario_id",
-            session.user.id
-          )
-          .in(
-            "partido_id",
-            partidoIds
-          );
-
-        if (pronosticosError) {
-          console.error(
-            "Error cargando pronósticos:",
-            pronosticosError
-          );
-        } else {
-          const nuevosPronosticos = {};
-
-          (
-            pronosticosData || []
-          ).forEach((pronostico) => {
-            nuevosPronosticos[
-              pronostico.partido_id
-            ] =
-              pronostico.pronostico;
-          });
-
-          setPronosticos(
-            nuevosPronosticos
-          );
-
-          /*
-           * Consideramos enviados los pronósticos cuando en Supabase
-           * existe un pronóstico válido para TODOS los partidos.
-           * Así el bloqueo funciona aunque el usuario cambie de
-           * navegador, dispositivo o recargue la página.
-           */
-          const pronosticosPorPartido =
-            new Map(
-              (pronosticosData || []).map(
-                (pronostico) => [
-                  pronostico.partido_id,
-                  pronostico.pronostico,
-                ]
-              )
-            );
-
-          const enviadosGuardados =
-            (partidosData || []).length > 0 &&
-            (partidosData || []).every(
-              (partido) =>
-                ["1", "X", "2"].includes(
-                  pronosticosPorPartido.get(partido.id)
-                )
-            );
-
-          setPronosticosEnviados(
-            enviadosGuardados
-          );
-        }
-      } else {
-        setPronosticos({});
-        setPronosticosEnviados(false);
-      }
-
-      setPronosticosTodos([]);
-      setCuotas({});
-      setPremiosJornada({});
-      setResultados({});
-
-      jornadaActual = {
-        ...jornadaActual,
-        resultadosCompletos: false,
-      };
-
-      setJornadaSeleccionada(
-        jornadaActual
+      jornadaTieneTodosLosResultados(
+        partidosData || []
       );
 
-      setVista("jornada");
-      setLoading(false);
-
-      return;
-    }
+    /*
+     * A partir de la fecha/hora de cierre se publican los pronósticos
+     * de todos, aunque todavía falten resultados.
+     */
+    const mostrarTodosPronosticos =
+      haPasadoCierre(jornadaActual) ||
+      jornadaActual.estado === "cerrada";
 
     /*
-     * JORNADA CERRADA
+     * Cargar pronósticos.
      *
-     * Solo cuando estado === "cerrada" cargamos los pronósticos
-     * de todos los jugadores para mostrarlos.
+     * Antes del cierre: solo los del usuario actual.
+     * Después del cierre: los de todos.
      */
     if (partidoIds.length > 0) {
-      const {
-        data: pronosticosData,
-        error: pronosticosError,
-      } = await supabase
+      const consulta = supabase
         .from("pronosticos")
         .select("*")
         .in(
@@ -409,9 +328,19 @@ function App() {
           partidoIds
         );
 
+      const {
+        data: pronosticosData,
+        error: pronosticosError,
+      } = mostrarTodosPronosticos
+        ? await consulta
+        : await consulta.eq(
+            "usuario_id",
+            session.user.id
+          );
+
       if (pronosticosError) {
         console.error(
-          "Error cargando pronósticos de la jornada cerrada:",
+          "Error cargando pronósticos:",
           pronosticosError
         );
 
@@ -423,61 +352,124 @@ function App() {
         return;
       }
 
-      const usuarioIds = [
-        ...new Set(
-          (pronosticosData || []).map(
-            (pronostico) =>
-              pronostico.usuario_id
-          )
-        ),
-      ];
+      /*
+       * Pronósticos del usuario actual.
+       * Se mantienen separados porque son los que utiliza el formulario
+       * antes de la publicación general.
+       */
+      const pronosticosUsuario =
+        (pronosticosData || []).filter(
+          (pronostico) =>
+            pronostico.usuario_id ===
+            session.user.id
+        );
 
-      let perfilesData = [];
+      const nuevosPronosticos = {};
 
-      if (usuarioIds.length > 0) {
-        const { data } = await supabase
-          .from("perfiles")
-          .select("id, nombre")
-          .in(
-            "id",
-            usuarioIds
-          );
+      pronosticosUsuario.forEach(
+        (pronostico) => {
+          nuevosPronosticos[
+            pronostico.partido_id
+          ] =
+            pronostico.pronostico;
+        }
+      );
 
-        perfilesData = data || [];
-      }
+      setPronosticos(
+        nuevosPronosticos
+      );
 
-      const perfilesPorId =
+      const pronosticosPorPartido =
         new Map(
-          perfilesData.map(
-            (jugador) => [
-              jugador.id,
-              jugador,
+          pronosticosUsuario.map(
+            (pronostico) => [
+              pronostico.partido_id,
+              pronostico.pronostico,
             ]
           )
         );
 
-      const datosCompletos =
-        (
-          pronosticosData || []
-        ).map(
-          (pronostico) => ({
-            ...pronostico,
-            perfil:
-              perfilesPorId.get(
-                pronostico.usuario_id
-              ),
-          })
+      const enviadosGuardados =
+        (partidosData || []).length > 0 &&
+        (partidosData || []).every(
+          (partido) =>
+            ["1", "X", "2"].includes(
+              pronosticosPorPartido.get(
+                partido.id
+              )
+            )
         );
 
-      setPronosticosTodos(
-        datosCompletos
+      setPronosticosEnviados(
+        enviadosGuardados
       );
+
+      /*
+       * Si ya ha pasado el cierre, enriquecemos los pronósticos
+       * de todos con su perfil para poder mostrarlos.
+       */
+      if (mostrarTodosPronosticos) {
+        const usuarioIds = [
+          ...new Set(
+            (pronosticosData || []).map(
+              (pronostico) =>
+                pronostico.usuario_id
+            )
+          ),
+        ];
+
+        let perfilesData = [];
+
+        if (usuarioIds.length > 0) {
+          const { data } =
+            await supabase
+              .from("perfiles")
+              .select("id, nombre")
+              .in(
+                "id",
+                usuarioIds
+              );
+
+          perfilesData = data || [];
+        }
+
+        const perfilesPorId =
+          new Map(
+            perfilesData.map(
+              (jugador) => [
+                jugador.id,
+                jugador,
+              ]
+            )
+          );
+
+        const datosCompletos =
+          (pronosticosData || []).map(
+            (pronostico) => ({
+              ...pronostico,
+              perfil:
+                perfilesPorId.get(
+                  pronostico.usuario_id
+                ),
+            })
+          );
+
+        setPronosticosTodos(
+          datosCompletos
+        );
+      } else {
+        setPronosticosTodos([]);
+      }
     } else {
+      setPronosticos({});
       setPronosticosTodos([]);
+      setPronosticosEnviados(false);
     }
 
     /*
-     * Cargar premios, cuotas y premios de la jornada.
+     * Cargar premios y cuotas.
+     * Los valores de aciertos/victorias/derrotas solo se consideran
+     * definitivos cuando jornadaCompleta es true.
      */
     const {
       data: premiosData,
@@ -520,7 +512,7 @@ function App() {
     );
 
     /*
-     * Resultados oficiales.
+     * Resultados oficiales: siempre visibles.
      */
     const resultadosIniciales = {};
 
@@ -537,20 +529,18 @@ function App() {
       resultadosIniciales
     );
 
-    /*
-     * Guardamos la condición real de finalización para que la interfaz
-     * no dependa de un estado antiguo de la fila jornadas.
-     */
     jornadaActual = {
       ...jornadaActual,
-      resultadosCompletos: jornadaCompleta,
+      resultadosCompletos:
+        jornadaCompleta,
+      pronosticosPublicados:
+        mostrarTodosPronosticos,
     };
 
-    setPronosticos({});
-    setPronosticosEnviados(false);
     setJornadaSeleccionada(
       jornadaActual
     );
+
     setVista("jornada");
     setLoading(false);
   }
@@ -737,8 +727,12 @@ function App() {
       return;
     }
 
-    // Solo se pueden seleccionar pronósticos mientras la jornada está abierta.
-    if (!jornadaSeleccionada || jornadaSeleccionada.estado !== "abierta") {
+    // Los pronósticos solo se pueden seleccionar antes de la fecha/hora de cierre.
+    if (
+      !jornadaSeleccionada ||
+      jornadaSeleccionada.estado !== "abierta" ||
+      haPasadoCierre(jornadaSeleccionada)
+    ) {
       return;
     }
 
@@ -755,10 +749,11 @@ function App() {
 
     if (
       jornadaSeleccionada.estado !==
-      "abierta"
+        "abierta" ||
+      haPasadoCierre(jornadaSeleccionada)
     ) {
       setErrorMessage(
-        "Esta jornada ya está cerrada."
+        "Ha pasado la hora de cierre. Los pronósticos ya no se pueden modificar."
       );
       return;
     }
@@ -1002,6 +997,82 @@ function App() {
    * La condición definitiva es que TODOS los partidos tengan
    * un resultado válido. No usamos jornada.estado para decidirlo.
    */
+  /*
+   * Convierte una fecha seleccionada en el panel de administración
+   * (YYYY-MM-DD) en las 12:00 de Europe/Madrid y devuelve el instante
+   * equivalente en UTC para guardarlo correctamente en timestamptz.
+   *
+   * No usamos un +01/+02 fijo porque España cambia entre horario de
+   * invierno y verano. Intl se encarga de aplicar el offset correcto.
+   */
+  function fechaMadridAMomentUTC(fecha) {
+    if (!fecha) return null;
+
+    const [year, month, day] = fecha.split("-").map(Number);
+
+    if (!year || !month || !day) return null;
+
+    const deseadoComoUTC = Date.UTC(
+      year,
+      month - 1,
+      day,
+      12,
+      0,
+      0
+    );
+
+    let candidato = deseadoComoUTC;
+
+    for (let i = 0; i < 3; i += 1) {
+      const partes = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Europe/Madrid",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }).formatToParts(new Date(candidato));
+
+      const valores = Object.fromEntries(
+        partes.map(({ type, value }) => [type, value])
+      );
+
+      const madridComoUTC = Date.UTC(
+        Number(valores.year),
+        Number(valores.month) - 1,
+        Number(valores.day),
+        Number(valores.hour),
+        Number(valores.minute),
+        Number(valores.second)
+      );
+
+      const offset = madridComoUTC - candidato;
+      candidato = deseadoComoUTC - offset;
+    }
+
+    return new Date(candidato).toISOString();
+  }
+
+  /*
+   * Comprueba si ya ha llegado la fecha/hora real de cierre.
+   *
+   * fecha_fin contiene el instante de las 12:00 Europe/Madrid.
+   * Esta función NO cierra la jornada ni calcula resultados.
+   * Solo controla cuándo dejan de poder modificarse los pronósticos
+   * y cuándo pasan a ser visibles los pronósticos de todos.
+   */
+  function haPasadoCierre(jornada) {
+    if (!jornada?.fecha_fin) return false;
+
+    const cierre = new Date(jornada.fecha_fin);
+
+    if (Number.isNaN(cierre.getTime())) return false;
+
+    return new Date() >= cierre;
+  }
+  
   function jornadaTieneTodosLosResultados(partidosJornada) {
     if (!partidosJornada || partidosJornada.length === 0) {
       return false;
@@ -1753,7 +1824,9 @@ function App() {
           fecha_inicio:
             adminJornada.fecha_inicio,
           fecha_fin:
-            adminJornada.fecha_fin,
+            fechaMadridAMomentUTC(
+              adminJornada.fecha_fin
+            ),
           responsable_id:
             adminJornada.responsable_id ||
             null,
@@ -2352,6 +2425,11 @@ function App() {
       );
   }
 
+  const mostrarPronosticosTodos = jornadaSeleccionada
+    ? haPasadoCierre(jornadaSeleccionada) ||
+      jornadaSeleccionada.estado === "cerrada"
+    : false;
+
   if (!session) {
     return (
       <main className="app">
@@ -2669,12 +2747,13 @@ function App() {
                 ← Volver a jornadas
               </button>
 
-              {jornadaSeleccionada.estado ===
-              "cerrada" ? (
+              {mostrarPronosticosTodos ? (
                 <>
                   <div className="section-title">
                     <p className="eyebrow">
-                      JORNADA FINALIZADA
+                      {jornadaSeleccionada.estado === "cerrada"
+                        ? "JORNADA FINALIZADA"
+                        : "PRONÓSTICOS PUBLICADOS"}
                     </p>
 
                     <h2>
@@ -2687,10 +2766,18 @@ function App() {
                       y pronósticos
                       de todos los
                       jugadores.
+                      {jornadaSeleccionada.estado !== "cerrada" &&
+                        " La jornada todavía no está cerrada y la clasificación definitiva no se ha calculado."}
                     </p>
 
-                    <span className="status-badge status-cerrada">
-                      CERRADA
+                    <span className={`status-badge ${
+                      jornadaSeleccionada.estado === "cerrada"
+                        ? "status-cerrada"
+                        : "status-abierta"
+                    }`}>
+                      {jornadaSeleccionada.estado === "cerrada"
+                        ? "CERRADA"
+                        : "PRONÓSTICOS PUBLICADOS"}
                     </span>
                   </div>
 
@@ -2825,9 +2912,9 @@ function App() {
                                     </span>
 
                                     <strong>
-                                      {
-                                        jugador.aciertos
-                                      }
+                                      {jornadaSeleccionada.resultadosCompletos
+                                        ? jugador.aciertos
+                                        : "-"}
                                     </strong>
                                   </div>
 
@@ -2852,11 +2939,12 @@ function App() {
                                     </strong>
                                   </div>
 
-                                  {Number(
-                                    jugador.premio
-                                  ) >
-                                    0 && (
-                                    <div className="winner-summary">
+                                  {jornadaSeleccionada.resultadosCompletos &&
+                                    Number(
+                                      jugador.premio
+                                    ) >
+                                      0 && (
+                                      <div className="winner-summary">
                                       <span>
                                         Premio
                                       </span>
@@ -2889,10 +2977,12 @@ function App() {
                                       );
 
                                     const acierto =
-                                      pronosticoAcertado(
-                                        partido.id,
-                                        apuesta?.pronostico
-                                      );
+                                      jornadaSeleccionada.resultadosCompletos
+                                        ? pronosticoAcertado(
+                                            partido.id,
+                                            apuesta?.pronostico
+                                          )
+                                        : null;
 
                                     return (
                                       <div
@@ -2982,7 +3072,9 @@ function App() {
                     </p>
 
                     <span className="status-badge status-abierta">
-                      ABIERTA
+                      {haPasadoCierre(jornadaSeleccionada)
+                        ? "PRONÓSTICOS PUBLICADOS"
+                        : "ABIERTA"}
                     </span>
                   </div>
 
@@ -3042,7 +3134,8 @@ function App() {
                                       opcion
                                     }
                                     disabled={
-                                      pronosticosEnviados
+                                      pronosticosEnviados ||
+                                      haPasadoCierre(jornadaSeleccionada)
                                     }
                                     className={
                                       pronosticos[
@@ -3075,7 +3168,11 @@ function App() {
                   {jornadaSeleccionada.estado ===
                     "abierta" && (
                     <>
-                      {pronosticosEnviados ? (
+                      {haPasadoCierre(jornadaSeleccionada) ? (
+                        <div className="empty-card">
+                          ✓ Ha pasado la hora de cierre. Los pronósticos de todos los jugadores ya están publicados.
+                        </div>
+                      ) : pronosticosEnviados ? (
                         <div className="empty-card">
                           ✓ Pronósticos enviados. Ya no se pueden modificar.
                         </div>
@@ -3995,7 +4092,7 @@ function App() {
                                   </button>
                                 ) : (
                                   <span className="form-help">
-                                    Se cerrará automáticamente al completar todos los resultados.
+                                    Se cerrará automáticamente al completar todos los resultados. Tras la hora límite se publican los pronósticos de todos.
                                   </span>
                                 )}
                               </div>
