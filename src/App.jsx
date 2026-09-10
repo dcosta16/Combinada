@@ -644,7 +644,7 @@ function App() {
         .select("id, nombre")
         .in(
           "id",
-          usuarioIds
+          perfilesIds
         );
 
       perfiles =
@@ -1558,7 +1558,7 @@ function App() {
       error: jornadasError,
     } = await supabase
       .from("jornadas")
-      .select("id, nombre")
+      .select("id, nombre, responsable_id")
       .order("id", {
         ascending: true,
       });
@@ -1665,6 +1665,21 @@ function App() {
       ),
     ];
 
+    const responsableIds = [
+      ...new Set(
+        (jornadasData || [])
+          .map((jornada) => jornada.responsable_id)
+          .filter(Boolean)
+      ),
+    ];
+
+    const perfilesIds = [
+      ...new Set([
+        ...usuarioIds,
+        ...responsableIds,
+      ]),
+    ];
+
     let perfiles = [];
 
     if (usuarioIds.length > 0) {
@@ -1713,6 +1728,10 @@ function App() {
           perfil:
             perfilesPorId.get(
               premio.usuario_id
+            ),
+          responsable:
+            perfilesPorId.get(
+              premio.jornadas?.responsable_id
             ),
         })
       );
@@ -3456,6 +3475,10 @@ function App() {
                       </th>
 
                       <th>
+                        Responsable
+                      </th>
+
+                      <th>
                         Aciertos
                       </th>
 
@@ -3643,6 +3666,13 @@ function App() {
                               .perfil
                               ?.nombre ||
                               "Jugador"}
+                          </td>
+
+                          <td className="nombre">
+                            {premio
+                              .responsable
+                              ?.nombre ||
+                              "Sin responsable"}
                           </td>
 
                           <td>
