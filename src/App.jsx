@@ -3630,10 +3630,6 @@ COMBINADA
                   </th>
 
                   <th>
-                    Responsable
-                  </th>
-
-                  <th>
                     Aciertos
                   </th>
 
