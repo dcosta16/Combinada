@@ -941,11 +941,19 @@ th {
   }
 
   .result-teams {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
   }
 
   .result-teams span {
-    display: none;
+    display: inline;
+    flex-shrink: 0;
+  }
+
+  .result-teams strong {
+    min-width: 0;
   }
 
   .closed-prediction-row {
