@@ -3002,19 +3002,13 @@ COMBINADA
 
                           <div className="result-teams">
                             <strong>
-                              {
-                                partido.equipo_local
-                              }
+                              {partido.equipo_local}
                             </strong>
 
-                            <span>
-                              -
-                            </span>
+                            <span>{" - "}</span>
 
                             <strong>
-                              {
-                                partido.equipo_visitante
-                              }
+                              {partido.equipo_visitante}
                             </strong>
                           </div>
 
