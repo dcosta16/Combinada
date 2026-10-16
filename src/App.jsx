@@ -639,16 +639,32 @@ if (partidoIds.length === 0) {
   return;
 }
 
-const {
-  data: pronosticosData,
-  error: pronosticosError,
-} = await supabase
+/*
+ * Antes de la hora de cierre, el responsable solo puede consultar
+ * sus propios pronósticos. Desde fecha_fin, puede ver los de todos.
+ */
+const mostrarPronosticosDeTodos =
+  haPasadoCierre(jornada);
+
+let consultaPronosticos = supabase
   .from("pronosticos")
   .select("*")
   .in(
     "partido_id",
     partidoIds
   );
+
+if (!mostrarPronosticosDeTodos) {
+  consultaPronosticos = consultaPronosticos.eq(
+    "usuario_id",
+    session.user.id
+  );
+}
+
+const {
+  data: pronosticosData,
+  error: pronosticosError,
+} = await consultaPronosticos;
 
 if (pronosticosError) {
   console.error(
@@ -3002,13 +3018,19 @@ COMBINADA
 
                           <div className="result-teams">
                             <strong>
-                              {partido.equipo_local}
+                              {
+                                partido.equipo_local
+                              }
                             </strong>
 
-                            <span>{" - "}</span>
+                            <span>
+                              -
+                            </span>
 
                             <strong>
-                              {partido.equipo_visitante}
+                              {
+                                partido.equipo_visitante
+                              }
                             </strong>
                           </div>
 
@@ -3392,11 +3414,9 @@ COMBINADA
             </h2>
 
             <p className="section-description">
-              Consulta los
-              pronósticos de
-              todos los
-              jugadores y
-              asigna sus cuotas.
+              {haPasadoCierre(jornadaSeleccionada)
+                ? "Consulta los pronósticos de todos los jugadores y asigna sus cuotas."
+                : "Antes de la hora de cierre solo puedes ver tus propios pronósticos. Los de los demás estarán disponibles a partir de las 12:00 o de la hora de cierre configurada."}
             </p>
           </div>
 
@@ -3419,10 +3439,9 @@ COMBINADA
               </h3>
 
               <p>
-                Los jugadores
-                aún no han
-                enviado sus
-                combinadas.
+                {haPasadoCierre(jornadaSeleccionada)
+                  ? "Todavía no hay pronósticos registrados."
+                  : "Los pronósticos de los demás jugadores estarán disponibles cuando llegue la hora de cierre."}
               </p>
             </div>
           ) : (
